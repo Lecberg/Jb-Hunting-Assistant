@@ -1059,9 +1059,9 @@ async function braveSearchProvider(criteria, generatedQueries) {
   const apiKey = process.env.BRAVE_SEARCH_API_KEY;
   if (!apiKey) {
     return {
-      provider: "mock",
-      results: fakeSearchProvider(criteria, generatedQueries),
-      warning: "BRAVE_SEARCH_API_KEY is missing, so mock results were used."
+      provider: "brave",
+      results: [],
+      warning: "BRAVE_SEARCH_API_KEY is missing, so live search results were not fetched."
     };
   }
 
@@ -1120,54 +1120,6 @@ async function braveSearchProvider(criteria, generatedQueries) {
     value: providerResult
   });
   return providerResult;
-}
-
-function fakeSearchProvider(criteria, generatedQueries) {
-  const companies = ["Arup", "Mott MacDonald", "SYSTRA", "AECOM", "WSP", "Jacobs", "MVA", "AtkinsRealis"];
-  const sources = ["Direct ATS", "Employer careers", "Verified posting", "Direct posting"];
-  const roles = criteria.targetRoles.length ? criteria.targetRoles : ["Transport Planning"];
-  const regions = criteria.targetRegions.length ? criteria.targetRegions : ["Hong Kong"];
-  const jobTypes = criteria.targetJobTypes.length ? criteria.targetJobTypes : ["Internship", "Graduate Role", "Full-time"];
-  const keywords = criteria.searchKeywords;
-  const limit = Math.max(1, Math.min(criteria.resultLimit || 20, 30));
-
-  return Array.from({ length: limit }, (_, index) => {
-    const role = roles[index % roles.length];
-    const region = regions[index % regions.length];
-    const type = jobTypes[index % jobTypes.length];
-    const company = companies[index % companies.length];
-    const keyword = keywords[index % Math.max(keywords.length, 1)] || "analysis";
-    const sourceName = sources[index % sources.length];
-    const query = generatedQueries[index % generatedQueries.length] || `${role} ${type} ${region}`;
-    const slug = `${company}-${role}-${type}-${region}`
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, "-")
-      .replace(/^-|-$/g, "");
-    const sourceUrl = index % 2 === 0
-      ? `https://jobs.lever.co/${company.toLowerCase().replace(/[^a-z0-9]+/g, "")}/${slug}`
-      : `https://${company.toLowerCase().replace(/[^a-z0-9]+/g, "")}.com/careers/jobs/${slug}`;
-
-    const result = {
-      id: `result_${Date.now()}_${index}`,
-      title: `${role} ${type}`,
-      company,
-      location: region,
-      employmentType: type,
-      sourceName,
-      sourceUrl,
-      snippet: `Public result candidate for ${role} in ${region}, mentioning ${keyword}, application support, project work, and analytical responsibilities.`,
-      postedAt: index % 4 === 0 ? null : new Date(Date.now() - index * 86400000).toISOString().slice(0, 10),
-      matchedQuery: query,
-      validationStatus: "mock-validated",
-      sourceQuality: index % 2 === 0 ? "direct-ats" : "employer-careers",
-      sourceLabel: index % 2 === 0 ? "Direct ATS" : "Verified posting"
-    };
-
-    result.canonicalUrl = normalizeUrlForDedupe(result.sourceUrl);
-    result.duplicateKey = getDuplicateKey(result);
-    result.jobPageConfidence = scoreJobPageConfidence(result);
-    return result;
-  });
 }
 
 function rankJobSearchResults(criteria, results) {
@@ -1835,7 +1787,7 @@ async function handleApi(req, res, pathname) {
 
     if (req.method === "POST" && pathname === "/api/save-job") {
       return sendJson(res, 410, {
-        error: "Saved jobs have been replaced by saved application kits. Use /api/save-application-kit."
+        error: "This endpoint has been retired. Use /api/save-application-kit."
       });
     }
 
