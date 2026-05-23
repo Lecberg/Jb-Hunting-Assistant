@@ -2,6 +2,12 @@
 
 This workspace includes a dependency-free MVP for resume-based job application analysis.
 
+## Live Version
+
+Configured by the project owner to use the DeepSeek V4 Flash model:
+
+[Open CareerPilot AI Application Studio](https://careerpilot-ai-application-studio.vercel.app)
+
 Users upload a resume, paste a job URL or the job hiring content, and generate:
 
 - Job-fit analysis
@@ -38,26 +44,6 @@ Open:
 
 ```text
 http://localhost:3000
-```
-
-## Deployment
-
-This app needs backend API routes and secret environment variables, so it cannot be deployed as a static GitHub Pages site. Use Vercel or another Node-capable host.
-
-On Vercel, configure these environment variables in the project settings before using the AI generation flow:
-
-```text
-LLM_API_KEY
-LLM_BASE_URL
-LLM_MODEL
-BRAVE_SEARCH_API_KEY
-BRAVE_SEARCH_API_ENDPOINT
-SEARCH_CACHE_TTL_MS
-RESUME_UPLOAD_MAX_BYTES
-APPLICATION_REQUEST_MAX_BYTES
-JOB_PAGE_FETCH_TIMEOUT_MS
-JOB_PAGE_MAX_BYTES
-JOB_PARSE_CACHE_TTL_MS
 ```
 
 ## What It Implements
