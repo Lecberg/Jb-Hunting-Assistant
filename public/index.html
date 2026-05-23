@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>CareerPilot AI - Application Studio</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <aside class="sidebar" aria-label="CareerPilot navigation">
+        <div class="brand">
+          <img class="brand-logo" src="/logo.svg" alt="" aria-hidden="true" />
+          <div>
+            <strong>CareerPilot AI</strong>
+            <span>Application studio</span>
+          </div>
+        </div>
+        <nav class="tab-nav" role="tablist" aria-label="CareerPilot sections">
+          <button class="active" id="tab-studio" type="button" role="tab" aria-selected="true" aria-controls="studio" data-tab="studio">Application Studio</button>
+          <button id="tab-kit" type="button" role="tab" aria-selected="false" aria-controls="kit" data-tab="kit">Application Kit</button>
+          <button id="tab-tracker" type="button" role="tab" aria-selected="false" aria-controls="tracker" data-tab="tracker">Saved Kits</button>
+        </nav>
+        <div class="status-panel">
+          <span class="status-dot"></span>
+          <div>
+            <strong>Manual job input</strong>
+            <p>Paste a job URL or hiring text, then generate analysis and tailored application materials from the uploaded resume.</p>
+          </div>
+        </div>
+      </aside>
+
+      <section class="workspace">
+        <header class="topbar">
+          <div id="topbarCopy">
+            <h1 id="topbarTitle">Turn one job post into a sharper application</h1>
+            <p id="topbarDescription">Upload a resume, paste the role, and let AI produce fit analysis, resume revisions, a dedicated cover letter, and a recruiter-ready email.</p>
+          </div>
+        </header>
+
+        <section class="panel studio-form tab-panel active" id="studio" role="tabpanel" aria-labelledby="tab-studio">
+          <div class="section-heading">
+            <span>1</span>
+            <div>
+              <h2>Application inputs</h2>
+              <p>Company name focuses online research; pasted job content still takes priority over URL text.</p>
+            </div>
+          </div>
+
+          <section class="resume-import" aria-labelledby="resumeImportTitle">
+            <div>
+              <h3 id="resumeImportTitle">Resume upload</h3>
+              <p>Upload a PDF, DOCX, or TXT resume. Files are processed in memory and not saved by this prototype.</p>
+            </div>
+            <div class="resume-upload-row">
+              <label class="file-picker">
+                <input id="resumeFileInput" type="file" accept=".pdf,.docx,.txt,text/plain,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document" />
+                <span id="resumeFileLabel">Choose resume file</span>
+              </label>
+            </div>
+            <p class="resume-import-note" id="resumeImportNote">Choose a resume before generating the application kit.</p>
+          </section>
+
+          <label>
+            Job URL
+            <input id="jobUrlInput" type="url" placeholder="https://company.com/careers/job-title" />
+          </label>
+
+          <label>
+            Company name
+            <input id="companyNameInput" type="text" placeholder="WSP, Arup, MTR Corporation" />
+          </label>
+
+          <label>
+            Job hiring content
+            <textarea id="jobTextInput" rows="11" placeholder="Paste the job description, responsibilities, requirements, and company context here."></textarea>
+          </label>
+
+          <label>
+            Writing tone
+            <select id="writingToneSelect">
+              <option selected>Bold Professional</option>
+              <option>Warm Storytelling</option>
+              <option>Formal Executive</option>
+            </select>
+          </label>
+
+          <div class="button-row studio-action-row">
+            <button type="button" class="primary" id="generateKitButton">Generate Application Kit</button>
+          </div>
+          <div class="analysis-progress" id="analysisProgress" hidden>
+            <div class="progress-copy">
+              <strong id="progressLabel">Preparing analysis...</strong>
+              <span id="progressPercent">0%</span>
+            </div>
+            <div class="progress-track" aria-hidden="true">
+              <div class="progress-bar" id="progressBar"></div>
+            </div>
+          </div>
+          <p class="manual-paste-warning" id="manualPasteWarning" hidden>Paste the job description manually. The job URL could not be read reliably.</p>
+        </section>
+
+        <section class="panel kit-panel tab-panel" id="kit" role="tabpanel" aria-labelledby="tab-kit" hidden>
+          <div class="kit-toolbar">
+            <div class="section-heading">
+              <span>2</span>
+              <div>
+                <h2>Generated application kit</h2>
+                <p>Move through each generated section without losing the target role context.</p>
+              </div>
+            </div>
+            <button type="button" class="primary" id="saveKitButton" disabled>Save Application Kit</button>
+          </div>
+
+          <div class="empty-state" id="kitEmpty">
+            Generate an application kit from the studio first. Analysis, resume suggestions, cover letter, and email will appear here.
+          </div>
+
+          <div class="kit-output" id="kitOutput" hidden aria-live="polite">
+            <section class="kit-summary">
+              <div>
+                <p class="eyebrow">Target role</p>
+                <h3 id="outputJobTitle"></h3>
+                <p id="outputJobMeta"></p>
+                <p id="outputSourceNote"></p>
+              </div>
+              <div class="score-badge report-score" id="fitScore">0/100</div>
+            </section>
+
+            <nav class="kit-tab-nav" role="tablist" aria-label="Generated kit sections">
+              <button class="active" id="kit-tab-analysis" type="button" role="tab" aria-selected="true" aria-controls="kit-panel-analysis" data-kit-tab="analysis">Analysis</button>
+              <button id="kit-tab-resume" type="button" role="tab" aria-selected="false" aria-controls="kit-panel-resume" data-kit-tab="resume">Resume Suggestions</button>
+              <button id="kit-tab-cover" type="button" role="tab" aria-selected="false" aria-controls="kit-panel-cover" data-kit-tab="cover">Cover Letter</button>
+              <button id="kit-tab-email" type="button" role="tab" aria-selected="false" aria-controls="kit-panel-email" data-kit-tab="email">Email</button>
+            </nav>
+
+            <div class="kit-tab-panels">
+              <section class="output-section kit-subpanel active" id="kit-panel-analysis" role="tabpanel" aria-labelledby="kit-tab-analysis">
+                <h4>Fit analysis</h4>
+                <p id="fitSummary"></p>
+                <div class="report-grid compact-report-grid">
+                  <div>
+                    <h4>Strong matches</h4>
+                    <ul id="strongMatchesList"></ul>
+                  </div>
+                  <div>
+                    <h4>Gaps to handle</h4>
+                    <ul id="gapsList"></ul>
+                  </div>
+                </div>
+                <div class="reason-box" id="applicationStrategy"></div>
+                <div class="company-research" id="companyResearchBox">
+                  <h4>Company research</h4>
+                  <p id="companyResearchMeta"></p>
+                  <div class="company-research-list" id="companyResearchList"></div>
+                </div>
+              </section>
+
+              <section class="output-section kit-subpanel" id="kit-panel-resume" role="tabpanel" aria-labelledby="kit-tab-resume" hidden>
+                <h4>Resume revision suggestions</h4>
+                <div class="suggestion-list" id="resumeSuggestionsList"></div>
+              </section>
+
+              <section class="output-section writing-output kit-subpanel" id="kit-panel-cover" role="tabpanel" aria-labelledby="kit-tab-cover" hidden>
+                <h4>Dedicated cover letter</h4>
+                <strong id="coverLetterSubject"></strong>
+                <div class="generated-copy" id="coverLetterBody"></div>
+              </section>
+
+              <section class="output-section writing-output kit-subpanel" id="kit-panel-email" role="tabpanel" aria-labelledby="kit-tab-email" hidden>
+                <h4>Application email</h4>
+                <strong id="applicationEmailSubject"></strong>
+                <div class="generated-copy" id="applicationEmailBody"></div>
+              </section>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel tracker tab-panel" id="tracker" role="tabpanel" aria-labelledby="tab-tracker" hidden>
+          <div class="section-heading">
+            <span>3</span>
+            <div>
+              <h2>Saved application kits</h2>
+              <p>Saved kits keep the target role, fit score, cover letter, and email together.</p>
+            </div>
+          </div>
+          <div class="saved-list" id="savedList">
+            <p class="muted">No saved application kits yet.</p>
+          </div>
+        </section>
+      </section>
+    </main>
+
+    <div class="toast" id="toast" role="status" aria-live="polite"></div>
+    <script src="/app.js"></script>
+  </body>
+</html>

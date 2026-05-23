@@ -1,0 +1,12 @@
+{
+  "name": "careerpilot-ai-application-studio",
+  "version": "1.0.0",
+  "private": true,
+  "description": "CareerPilot AI MVP prototype for resume-based application analysis.",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
