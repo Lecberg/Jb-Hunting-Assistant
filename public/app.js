@@ -17,12 +17,16 @@ const analysisProgress = document.querySelector("#analysisProgress");
 const progressLabel = document.querySelector("#progressLabel");
 const progressPercent = document.querySelector("#progressPercent");
 const progressBar = document.querySelector("#progressBar");
+const progressSteps = document.querySelector("#progressSteps");
 const kitEmpty = document.querySelector("#kitEmpty");
 const kitOutput = document.querySelector("#kitOutput");
 const outputJobTitle = document.querySelector("#outputJobTitle");
 const outputJobMeta = document.querySelector("#outputJobMeta");
 const outputSourceNote = document.querySelector("#outputSourceNote");
 const fitScore = document.querySelector("#fitScore");
+const fitVisual = document.querySelector("#fitVisual");
+const fitRingValue = document.querySelector("#fitRingValue");
+const fitVerdict = document.querySelector("#fitVerdict");
 const fitSummary = document.querySelector("#fitSummary");
 const strongMatchesList = document.querySelector("#strongMatchesList");
 const gapsList = document.querySelector("#gapsList");
@@ -45,11 +49,11 @@ let progressStageIndex = 0;
 let progressValue = 0;
 
 const progressStages = [
-  { label: "Reading resume evidence...", target: 18 },
-  { label: "Parsing job content...", target: 36 },
-  { label: "Researching the company online...", target: 58 },
-  { label: "Matching resume, role, and company context...", target: 78 },
-  { label: "Writing cover letter and email...", target: 92 }
+  { label: "Reading resume", target: 18 },
+  { label: "Parsing job post", target: 36 },
+  { label: "Researching company", target: 58 },
+  { label: "Scoring fit against role", target: 78 },
+  { label: "Writing cover letter & email", target: 92 }
 ];
 
 const tabCopy = {
@@ -159,27 +163,39 @@ function setProgress(value, label) {
   progressBar.style.width = `${safeValue}%`;
 }
 
+function renderProgressSteps(activeIndex, allDone = false) {
+  [...progressSteps.children].forEach((step, index) => {
+    step.dataset.state = allDone || index < activeIndex ? "done" : index === activeIndex ? "active" : "pending";
+  });
+}
+
 function startProgress() {
   window.clearInterval(progressTimer);
   progressStageIndex = 0;
   analysisProgress.hidden = false;
-  setProgress(4, progressStages[0].label);
+  progressSteps.innerHTML = progressStages
+    .map((stage) => `<li data-state="pending">${escapeHtml(stage.label)}</li>`)
+    .join("");
+  renderProgressSteps(0);
+  setProgress(4, `${progressStages[0].label}...`);
 
   progressTimer = window.setInterval(() => {
     const stage = progressStages[progressStageIndex] || progressStages.at(-1);
     if (progressValue < stage.target) {
-      setProgress(progressValue + Math.max(1, Math.round((stage.target - progressValue) / 5)), stage.label);
+      setProgress(progressValue + Math.max(1, Math.round((stage.target - progressValue) / 5)), `${stage.label}...`);
       return;
     }
     if (progressStageIndex < progressStages.length - 1) {
       progressStageIndex += 1;
-      setProgress(progressValue + 1, progressStages[progressStageIndex].label);
+      renderProgressSteps(progressStageIndex);
+      setProgress(progressValue + 1, `${progressStages[progressStageIndex].label}...`);
     }
   }, 520);
 }
 
 function finishProgress(label = "Application kit ready.") {
   window.clearInterval(progressTimer);
+  renderProgressSteps(progressStages.length, true);
   setProgress(100, label);
   window.setTimeout(() => {
     analysisProgress.hidden = true;
@@ -195,7 +211,51 @@ function renderList(target, items) {
   const safeItems = Array.isArray(items) ? items.filter(Boolean) : [];
   target.innerHTML = safeItems.length
     ? safeItems.map((item) => `<li>${escapeHtml(item)}</li>`).join("")
-    : "<li>No items generated.</li>";
+    : '<li class="chip-empty">No items generated.</li>';
+}
+
+const FIT_RING_CIRCUMFERENCE = 2 * Math.PI * 52;
+
+function scoreBand(score) {
+  if (score >= 75) return "strong";
+  if (score >= 50) return "stretch";
+  return "long";
+}
+
+const fitVerdicts = {
+  strong: "Strong fit",
+  stretch: "Stretch fit",
+  long: "Long shot"
+};
+
+function animateNumber(target, finalValue, duration = 900) {
+  const start = performance.now();
+  function frame(now) {
+    const progress = Math.min(1, (now - start) / duration);
+    const eased = 1 - Math.pow(1 - progress, 3);
+    target.textContent = String(Math.round(finalValue * eased));
+    if (progress < 1) window.requestAnimationFrame(frame);
+  }
+  window.requestAnimationFrame(frame);
+  // rAF is suspended in hidden tabs; guarantee the final value regardless.
+  window.setTimeout(() => {
+    target.textContent = String(finalValue);
+  }, duration + 150);
+}
+
+function setFitScore(score) {
+  const safeScore = Math.max(0, Math.min(100, Math.round(Number(score) || 0)));
+  const band = scoreBand(safeScore);
+  fitVisual.dataset.band = band;
+  fitVerdict.textContent = fitVerdicts[band];
+  fitRingValue.style.transition = "none";
+  fitRingValue.style.strokeDashoffset = String(FIT_RING_CIRCUMFERENCE);
+  void fitRingValue.getBoundingClientRect();
+  fitRingValue.style.transition = "";
+  animateNumber(fitScore, safeScore);
+  window.setTimeout(() => {
+    fitRingValue.style.strokeDashoffset = String(FIT_RING_CIRCUMFERENCE * (1 - safeScore / 100));
+  }, 40);
 }
 
 function renderSuggestions(suggestions) {
@@ -256,7 +316,7 @@ function renderKit(payload) {
   outputSourceNote.textContent = `${source?.type === "manual" ? "Generated from pasted job content" : "Generated from job URL"}${
     resume?.filename ? ` using ${resume.filename}` : ""
   }. ${companyResearch?.results?.length ? `Company research used ${companyResearch.results.length} search results.` : companyResearch?.warning || ""}`.trim();
-  fitScore.textContent = `${fit.overallScore || 0}/100`;
+  setFitScore(fit.overallScore);
   fitSummary.textContent = fit.fitSummary || "No fit summary generated.";
   renderList(strongMatchesList, fit.strongMatches);
   renderList(gapsList, fit.gaps);
@@ -269,6 +329,9 @@ function renderKit(payload) {
   applicationEmailBody.innerHTML = textToHtml(kit.applicationEmail?.body);
   switchKitTab("analysis");
   switchTab("kit");
+  kitOutput.classList.remove("reveal");
+  void kitOutput.offsetWidth;
+  kitOutput.classList.add("reveal");
 }
 
 function openSavedKit(savedKit) {
@@ -424,6 +487,33 @@ generateKitButton.addEventListener("click", () => {
 });
 
 saveKitButton.addEventListener("click", saveApplicationKit);
+
+const copySources = {
+  cover: () => [coverLetterSubject, coverLetterBody],
+  email: () => [applicationEmailSubject, applicationEmailBody]
+};
+
+document.querySelectorAll("[data-copy-source]").forEach((button) => {
+  button.addEventListener("click", async () => {
+    if (!activeKitPayload) {
+      showToast("Generate an application kit first.");
+      return;
+    }
+    const [subjectElement, bodyElement] = copySources[button.dataset.copySource]();
+    const text = `${subjectElement.textContent}\n\n${bodyElement.innerText}`.trim();
+    try {
+      await navigator.clipboard.writeText(text);
+      button.classList.add("copied");
+      button.textContent = "Copied";
+      window.setTimeout(() => {
+        button.classList.remove("copied");
+        button.textContent = "Copy text";
+      }, 1600);
+    } catch {
+      showToast("Copy failed. Select the text manually.");
+    }
+  });
+});
 
 tabButtons.forEach((button) => {
   button.addEventListener("click", () => switchTab(button.dataset.tab));

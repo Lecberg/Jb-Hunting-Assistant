@@ -4,6 +4,9 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>CareerPilot AI - Application Studio</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet" />
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
@@ -96,6 +99,7 @@
             <div class="progress-track" aria-hidden="true">
               <div class="progress-bar" id="progressBar"></div>
             </div>
+            <ol class="progress-steps" id="progressSteps"></ol>
           </div>
           <p class="manual-paste-warning" id="manualPasteWarning" hidden>Paste the job description manually. The job URL could not be read reliably.</p>
         </section>
@@ -124,7 +128,19 @@
                 <p id="outputJobMeta"></p>
                 <p id="outputSourceNote"></p>
               </div>
-              <div class="score-badge report-score" id="fitScore">0/100</div>
+              <div class="fit-visual" id="fitVisual">
+                <div class="fit-ring" role="img" aria-label="Overall fit score">
+                  <svg viewBox="0 0 120 120" aria-hidden="true">
+                    <circle class="fit-ring-track" cx="60" cy="60" r="52"></circle>
+                    <circle class="fit-ring-value" id="fitRingValue" cx="60" cy="60" r="52"></circle>
+                  </svg>
+                  <div class="fit-ring-number">
+                    <strong id="fitScore">0</strong>
+                    <span>/100</span>
+                  </div>
+                </div>
+                <span class="fit-verdict" id="fitVerdict">Fit score</span>
+              </div>
             </section>
 
             <nav class="kit-tab-nav" role="tablist" aria-label="Generated kit sections">
@@ -141,11 +157,11 @@
                 <div class="report-grid compact-report-grid">
                   <div>
                     <h4>Strong matches</h4>
-                    <ul id="strongMatchesList"></ul>
+                    <ul id="strongMatchesList" class="chip-list chips-good"></ul>
                   </div>
                   <div>
                     <h4>Gaps to handle</h4>
-                    <ul id="gapsList"></ul>
+                    <ul id="gapsList" class="chip-list chips-gap"></ul>
                   </div>
                 </div>
                 <div class="reason-box" id="applicationStrategy"></div>
@@ -162,14 +178,20 @@
               </section>
 
               <section class="output-section writing-output kit-subpanel" id="kit-panel-cover" role="tabpanel" aria-labelledby="kit-tab-cover" hidden>
-                <h4>Dedicated cover letter</h4>
-                <strong id="coverLetterSubject"></strong>
+                <div class="doc-header">
+                  <h4>Dedicated cover letter</h4>
+                  <button type="button" class="copy-button" data-copy-source="cover">Copy text</button>
+                </div>
+                <strong class="doc-subject" id="coverLetterSubject"></strong>
                 <div class="generated-copy" id="coverLetterBody"></div>
               </section>
 
               <section class="output-section writing-output kit-subpanel" id="kit-panel-email" role="tabpanel" aria-labelledby="kit-tab-email" hidden>
-                <h4>Application email</h4>
-                <strong id="applicationEmailSubject"></strong>
+                <div class="doc-header">
+                  <h4>Application email</h4>
+                  <button type="button" class="copy-button" data-copy-source="email">Copy text</button>
+                </div>
+                <strong class="doc-subject" id="applicationEmailSubject"></strong>
                 <div class="generated-copy" id="applicationEmailBody"></div>
               </section>
             </div>
