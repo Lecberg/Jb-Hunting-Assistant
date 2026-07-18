@@ -123,12 +123,11 @@ function textToHtml(value) {
   return paragraphs.map((paragraph) => `<p>${escapeHtml(paragraph).replace(/\n/g, "<br />")}</p>`).join("");
 }
 
-async function postJson(url, payload) {
-  const response = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload)
-  });
+async function parseJsonResponse(response) {
+  const contentType = response.headers.get("content-type") || "";
+  if (!contentType.includes("application/json")) {
+    throw new Error(`Request failed (status ${response.status}).`);
+  }
   const data = await response.json();
   if (!response.ok) {
     const error = new Error(data.error || "Request failed");
@@ -143,13 +142,7 @@ async function postFormData(url, payload) {
     method: "POST",
     body: payload
   });
-  const data = await response.json();
-  if (!response.ok) {
-    const error = new Error(data.error || "Request failed");
-    error.data = data;
-    throw error;
-  }
-  return data;
+  return parseJsonResponse(response);
 }
 
 function showToast(message) {
@@ -223,6 +216,10 @@ function renderSuggestions(suggestions) {
     : '<p class="muted">No resume revisions generated.</p>';
 }
 
+function safeHttpUrl(value) {
+  return /^https?:\/\//i.test(String(value || "")) ? String(value) : "";
+}
+
 function renderCompanyResearch(companyResearch) {
   const results = Array.isArray(companyResearch?.results) ? companyResearch.results : [];
   const warning = companyResearch?.warning;
@@ -233,15 +230,16 @@ function renderCompanyResearch(companyResearch) {
 
   companyResearchList.innerHTML = results.length
     ? results
-        .map(
-          (result) => `
+        .map((result) => {
+          const url = safeHttpUrl(result.url);
+          return `
             <article class="company-research-item">
               <strong>${escapeHtml(result.title || "Untitled source")}</strong>
-              ${result.url ? `<a href="${escapeHtml(result.url)}" target="_blank" rel="noreferrer">${escapeHtml(result.url)}</a>` : ""}
+              ${url ? `<a href="${escapeHtml(url)}" target="_blank" rel="noreferrer">${escapeHtml(url)}</a>` : ""}
               <p>${escapeHtml(result.snippet || "No snippet returned.")}</p>
             </article>
-          `
-        )
+          `;
+        })
         .join("")
     : '<p class="muted">No company search snippets were available for this run.</p>';
 }
@@ -339,16 +337,48 @@ async function generateApplicationKit() {
   }
 }
 
-async function saveApplicationKit() {
+const SAVED_KITS_STORAGE_KEY = "careerpilot.savedKits.v1";
+const SAVED_KITS_MAX = 30;
+
+function readSavedKits() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(SAVED_KITS_STORAGE_KEY) || "[]");
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeSavedKits(kits) {
+  try {
+    localStorage.setItem(SAVED_KITS_STORAGE_KEY, JSON.stringify(kits));
+    return true;
+  } catch {
+    showToast("Browser storage is full. Older saved kits could not be kept.");
+    return false;
+  }
+}
+
+function saveApplicationKit() {
   if (!activeKitPayload) {
     showToast("Generate an application kit before saving.");
     return;
   }
 
-  const data = await postJson("/api/save-application-kit", activeKitPayload);
-  renderSavedKits(data.savedApplicationKits);
+  const savedKit = {
+    id: `kit_${Date.now()}`,
+    kit: activeKitPayload.kit,
+    source: activeKitPayload.source || null,
+    resume: activeKitPayload.resume || null,
+    companyResearch: activeKitPayload.companyResearch || null,
+    savedAt: new Date().toISOString(),
+    status: "Generated"
+  };
+  const savedKits = [savedKit, ...readSavedKits()].slice(0, SAVED_KITS_MAX);
+  if (!writeSavedKits(savedKits)) return;
+  renderSavedKits(savedKits);
   switchTab("tracker");
-  showToast(`${data.savedKit.kit.job.title} saved to tracker.`);
+  showToast(`${savedKit.kit.job?.title || "Application kit"} saved to tracker.`);
 }
 
 function renderSavedKits(savedKits) {
@@ -380,11 +410,6 @@ function renderSavedKits(savedKits) {
   });
 }
 
-async function loadSavedKits() {
-  const response = await fetch("/api/saved-application-kits");
-  const data = await response.json();
-  renderSavedKits(data.savedApplicationKits || []);
-}
 
 resumeFileInput.addEventListener("change", () => {
   const file = resumeFileInput.files[0];
@@ -398,9 +423,7 @@ generateKitButton.addEventListener("click", () => {
   generateApplicationKit().catch((error) => showToast(error.message));
 });
 
-saveKitButton.addEventListener("click", () => {
-  saveApplicationKit().catch((error) => showToast(error.message));
-});
+saveKitButton.addEventListener("click", saveApplicationKit);
 
 tabButtons.forEach((button) => {
   button.addEventListener("click", () => switchTab(button.dataset.tab));
@@ -410,6 +433,4 @@ kitTabButtons.forEach((button) => {
   button.addEventListener("click", () => switchKitTab(button.dataset.kitTab));
 });
 
-loadSavedKits().catch(() => {
-  savedList.innerHTML = '<p class="muted">Saved kits could not be loaded.</p>';
-});
+renderSavedKits(readSavedKits());

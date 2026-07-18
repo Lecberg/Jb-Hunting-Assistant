@@ -4,9 +4,9 @@ This workspace includes a dependency-free MVP for resume-based job application a
 
 ## Live Version
 
-Configured by the project owner to use the DeepSeek V4 Flash model:
-
 [Open CareerPilot AI Application Studio](https://careerpilot-ai-application-studio.vercel.app)
+
+The backend calls any OpenAI-compatible chat-completions API; the active model is whatever `LLM_MODEL` is configured to on the deployment.
 
 Users upload a resume, paste a job URL or the job hiring content, and generate:
 
@@ -14,7 +14,7 @@ Users upload a resume, paste a job URL or the job hiring content, and generate:
 - Resume revision suggestions
 - A dedicated cover letter
 - A concise application email
-- Saved application kits for follow-up
+- Saved application kits for follow-up (stored in the user's own browser via localStorage)
 
 ## Run
 
@@ -31,7 +31,8 @@ RESUME_UPLOAD_MAX_BYTES='2000000'
 APPLICATION_REQUEST_MAX_BYTES='3000000'
 JOB_PAGE_FETCH_TIMEOUT_MS='8000'
 JOB_PAGE_MAX_BYTES='750000'
-JOB_PARSE_CACHE_TTL_MS='1800000'
+GENERATION_RATE_LIMIT_WINDOW_MS='600000'
+GENERATION_RATE_LIMIT_MAX='5'
 ```
 
 Then start the app:
@@ -48,27 +49,32 @@ http://localhost:3000
 
 ## What It Implements
 
-- Resume upload for PDF, DOCX, and TXT
+- Resume upload for PDF, DOCX, and TXT (text-based PDFs work best; scanned PDFs cannot be read)
 - Manual job URL input
 - Manual pasted job-description input
-- URL fetching with safe public-URL validation
+- URL fetching with public-URL validation (private/local hosts, private DNS answers, and unvalidated redirects are rejected)
 - Company research through the configured Brave Search API
 - Clear manual-paste fallback when a job URL cannot be read reliably
 - Staged progress bar during analysis and generation
 - OpenAI-compatible LLM generation through the backend
 - Structured application kit rendering
-- Saved application kit tracker
+- Saved application kit tracker (browser localStorage, per-browser, capped at 30 kits)
+- Per-IP rate limiting on the generation endpoints
 
 ## API Endpoints
 
 ```text
 POST /api/analyze-application
-POST /api/save-application-kit
-GET  /api/saved-application-kits
 POST /api/analyze-resume
 ```
 
-The old search endpoints are intentionally not part of the active product flow.
+Retired endpoints (job search, server-side kit storage) return `410 Gone`. Saved kits now live entirely in the browser.
+
+## Rate Limiting
+
+`POST /api/analyze-application` and `POST /api/analyze-resume` are limited per client IP (`GENERATION_RATE_LIMIT_MAX` requests per `GENERATION_RATE_LIMIT_WINDOW_MS`, default 5 per 10 minutes). Exceeding the limit returns `429` with a `Retry-After` header.
+
+Note: the limiter is in-memory and per-serverless-instance on Vercel — it deters casual abuse but is not a hard guarantee. Do not treat it as billing protection for high-value API keys.
 
 ## Application Analysis Note
 

@@ -1,4 +1,5 @@
 const http = require("node:http");
+const dns = require("node:dns");
 const fs = require("node:fs");
 const net = require("node:net");
 const path = require("node:path");
@@ -8,8 +9,6 @@ const { URL } = require("node:url");
 const PORT = process.env.PORT || 3000;
 const PUBLIC_DIR = path.join(__dirname, "public");
 const DEFAULT_BRAVE_SEARCH_API_ENDPOINT = "https://api.search.brave.com/res/v1/web/search";
-
-const savedApplicationKits = [];
 
 const mimeTypes = {
   ".html": "text/html; charset=utf-8",
@@ -49,80 +48,20 @@ function loadEnvFile() {
 loadEnvFile();
 
 const SEARCH_CACHE_TTL_MS = Number(process.env.SEARCH_CACHE_TTL_MS || 15 * 60 * 1000);
-const SEARCH_RATE_LIMIT_WINDOW_MS = Number(process.env.SEARCH_RATE_LIMIT_WINDOW_MS || 60 * 1000);
-const SEARCH_RATE_LIMIT_MAX = Number(process.env.SEARCH_RATE_LIMIT_MAX || 12);
+const GENERATION_RATE_LIMIT_WINDOW_MS = Number(process.env.GENERATION_RATE_LIMIT_WINDOW_MS || 10 * 60 * 1000);
+const GENERATION_RATE_LIMIT_MAX = Number(process.env.GENERATION_RATE_LIMIT_MAX || 5);
 const JOB_PAGE_FETCH_TIMEOUT_MS = Number(process.env.JOB_PAGE_FETCH_TIMEOUT_MS || 8000);
 const JOB_PAGE_MAX_BYTES = Number(process.env.JOB_PAGE_MAX_BYTES || 750000);
-const JOB_PARSE_CACHE_TTL_MS = Number(process.env.JOB_PARSE_CACHE_TTL_MS || 30 * 60 * 1000);
 const RESUME_UPLOAD_MAX_BYTES = Number(process.env.RESUME_UPLOAD_MAX_BYTES || 2_000_000);
 const APPLICATION_REQUEST_MAX_BYTES = Number(process.env.APPLICATION_REQUEST_MAX_BYTES || RESUME_UPLOAD_MAX_BYTES + 1_000_000);
 const DEFAULT_LLM_BASE_URL = "https://api.openai.com/v1";
 
 const searchCache = new Map();
-const jobParseCache = new Map();
 const rateLimitBuckets = new Map();
-
-const DIRECT_ATS_HOST_PATTERNS = [
-  /(^|\.)greenhouse\.io$/i,
-  /^jobs\.lever\.co$/i,
-  /(^|\.)myworkdayjobs\.com$/i,
-  /(^|\.)smartrecruiters\.com$/i,
-  /(^|\.)ashbyhq\.com$/i,
-  /(^|\.)bamboohr\.com$/i,
-  /(^|\.)icims\.com$/i,
-  /(^|\.)workable\.com$/i,
-  /(^|\.)jobvite\.com$/i,
-  /(^|\.)recruitee\.com$/i,
-  /(^|\.)personio\.com$/i,
-  /(^|\.)successfactors\.com$/i
-];
-
-const THIRD_PARTY_JOB_HOST_PATTERNS = [
-  /(^|\.)linkedin\.com$/i,
-  /(^|\.)indeed\.com$/i,
-  /(^|\.)glassdoor\.com$/i,
-  /(^|\.)ziprecruiter\.com$/i,
-  /(^|\.)monster\.com$/i,
-  /(^|\.)simplyhired\.com$/i,
-  /(^|\.)jooble\.org$/i,
-  /(^|\.)talent\.com$/i,
-  /(^|\.)careerjet\./i,
-  /(^|\.)reed\.co\.uk$/i,
-  /(^|\.)totaljobs\.com$/i,
-  /(^|\.)jobsdb\.com$/i
-];
-
-const GENERIC_SEARCH_HOST_PATTERNS = [
-  /(^|\.)google\./i,
-  /(^|\.)bing\.com$/i,
-  /(^|\.)duckduckgo\.com$/i,
-  /(^|\.)yahoo\.com$/i
-];
 
 function sendJson(res, status, payload) {
   res.writeHead(status, { "Content-Type": "application/json; charset=utf-8" });
   res.end(JSON.stringify(payload, null, 2));
-}
-
-function readRequestBody(req) {
-  return new Promise((resolve, reject) => {
-    let body = "";
-    req.on("data", (chunk) => {
-      body += chunk;
-      if (body.length > 1_000_000) {
-        req.destroy();
-        reject(new Error("Request body too large"));
-      }
-    });
-    req.on("end", () => {
-      try {
-        resolve(body ? JSON.parse(body) : {});
-      } catch (error) {
-        reject(error);
-      }
-    });
-    req.on("error", reject);
-  });
 }
 
 function readRequestBuffer(req, maxBytes) {
@@ -134,7 +73,7 @@ function readRequestBuffer(req, maxBytes) {
       totalBytes += chunk.byteLength;
       if (totalBytes > maxBytes) {
         req.destroy();
-        reject(new Error(`Request body too large. Maximum size is ${maxBytes} bytes.`));
+        reject(Object.assign(new Error(`Request body too large. Maximum size is ${maxBytes} bytes.`), { statusCode: 413 }));
         return;
       }
       chunks.push(chunk);
@@ -148,7 +87,7 @@ function parseMultipartFormData(req, bodyBuffer) {
   const contentType = req.headers["content-type"] || "";
   const boundaryMatch = contentType.match(/boundary=(?:"([^"]+)"|([^;]+))/i);
   if (!boundaryMatch) {
-    throw new Error("Resume upload must use multipart/form-data.");
+    throw Object.assign(new Error("Resume upload must use multipart/form-data."), { statusCode: 400 });
   }
 
   const boundary = `--${boundaryMatch[1] || boundaryMatch[2]}`;
@@ -216,27 +155,46 @@ function stableStringify(value) {
   return JSON.stringify(value);
 }
 
+function pruneCache(map, ttlMs, maxEntries = 100) {
+  const now = Date.now();
+  for (const [key, entry] of map) {
+    if (now - entry.createdAt >= ttlMs) map.delete(key);
+  }
+  while (map.size > maxEntries) {
+    map.delete(map.keys().next().value);
+  }
+}
+
 function getClientIp(req) {
+  const realIp = String(req.headers["x-real-ip"] || "").trim();
+  if (realIp) return realIp;
   return String(req.headers["x-forwarded-for"] || req.socket.remoteAddress || "local")
     .split(",")[0]
     .trim();
 }
 
-function consumeSearchRateLimit(req) {
+function consumeGenerationRateLimit(req) {
   const clientIp = getClientIp(req);
   const now = Date.now();
-  const bucket = rateLimitBuckets.get(clientIp) || { count: 0, resetAt: now + SEARCH_RATE_LIMIT_WINDOW_MS };
+
+  if (rateLimitBuckets.size > 500) {
+    for (const [ip, staleBucket] of rateLimitBuckets) {
+      if (now > staleBucket.resetAt) rateLimitBuckets.delete(ip);
+    }
+  }
+
+  const bucket = rateLimitBuckets.get(clientIp) || { count: 0, resetAt: now + GENERATION_RATE_LIMIT_WINDOW_MS };
 
   if (now > bucket.resetAt) {
     bucket.count = 0;
-    bucket.resetAt = now + SEARCH_RATE_LIMIT_WINDOW_MS;
+    bucket.resetAt = now + GENERATION_RATE_LIMIT_WINDOW_MS;
   }
 
   bucket.count += 1;
   rateLimitBuckets.set(clientIp, bucket);
 
   return {
-    allowed: bucket.count <= SEARCH_RATE_LIMIT_MAX,
+    allowed: bucket.count <= GENERATION_RATE_LIMIT_MAX,
     retryAfterSeconds: Math.max(1, Math.ceil((bucket.resetAt - now) / 1000))
   };
 }
@@ -313,7 +271,7 @@ function extractZipEntries(buffer) {
   }
 
   if (eocdOffset === -1) {
-    throw new Error("DOCX file could not be read as a ZIP archive.");
+    throw Object.assign(new Error("DOCX file could not be read as a ZIP archive."), { statusCode: 422 });
   }
 
   const centralDirectoryOffset = buffer.readUInt32LE(eocdOffset + 16);
@@ -336,16 +294,21 @@ function extractZipEntries(buffer) {
     const dataStart = localHeaderOffset + 30 + localNameLength + localExtraLength;
     const compressed = buffer.slice(dataStart, dataStart + compressedSize);
 
-    let data;
-    if (compressionMethod === 0) {
-      data = compressed;
-    } else if (compressionMethod === 8) {
-      data = zlib.inflateRawSync(compressed);
-    } else {
-      data = Buffer.alloc(0);
+    if (fileName === "word/document.xml") {
+      let data;
+      try {
+        if (compressionMethod === 0) {
+          data = compressed;
+        } else if (compressionMethod === 8) {
+          data = zlib.inflateRawSync(compressed, { maxOutputLength: 20_000_000 });
+        } else {
+          data = Buffer.alloc(0);
+        }
+      } catch {
+        throw Object.assign(new Error("DOCX content is too large or corrupted to process."), { statusCode: 422 });
+      }
+      entries.set(fileName, data);
     }
-
-    entries.set(fileName, data);
     cursor += 46 + fileNameLength + extraLength + commentLength;
   }
 
@@ -356,7 +319,7 @@ function extractDocxText(buffer) {
   const entries = extractZipEntries(buffer);
   const documentXml = entries.get("word/document.xml");
   if (!documentXml) {
-    throw new Error("DOCX file did not contain word/document.xml.");
+    throw Object.assign(new Error("DOCX file did not contain word/document.xml."), { statusCode: 422 });
   }
   return cleanExtractedText(xmlToText(documentXml.toString("utf8")));
 }
@@ -370,10 +333,10 @@ function extractPdfText(buffer) {
     const streamBuffer = Buffer.from(match[1], "latin1");
     const candidates = [streamBuffer];
     try {
-      candidates.push(zlib.inflateSync(streamBuffer));
+      candidates.push(zlib.inflateSync(streamBuffer, { maxOutputLength: 20_000_000 }));
     } catch {}
     try {
-      candidates.push(zlib.inflateRawSync(streamBuffer));
+      candidates.push(zlib.inflateRawSync(streamBuffer, { maxOutputLength: 20_000_000 }));
     } catch {}
 
     for (const candidate of candidates) {
@@ -398,7 +361,10 @@ function extractPdfText(buffer) {
 
   const cleaned = cleanExtractedText(fragments.join("\n"));
   if (cleaned.length < 80) {
-    throw new Error("Could not extract enough text from this PDF. Try exporting the resume as text-based PDF, DOCX, or TXT.");
+    throw Object.assign(
+      new Error("Could not extract enough text from this PDF. Try exporting the resume as text-based PDF, DOCX, or TXT."),
+      { statusCode: 422 }
+    );
   }
   return cleaned;
 }
@@ -417,7 +383,7 @@ function extractResumeText(file) {
     return extractPdfText(file.buffer);
   }
 
-  throw new Error("Unsupported resume file type. Upload a PDF, DOCX, or TXT file.");
+  throw Object.assign(new Error("Unsupported resume file type. Upload a PDF, DOCX, or TXT file."), { statusCode: 400 });
 }
 
 function coerceProfilePayload(value) {
@@ -439,7 +405,9 @@ function coerceProfilePayload(value) {
 async function analyzeResumeWithLlm(resumeText) {
   const apiKey = process.env.LLM_API_KEY;
   if (!apiKey) {
-    throw new Error("LLM_API_KEY is not configured. Add it to .env before using resume analysis.");
+    throw Object.assign(new Error("LLM_API_KEY is not configured. Add it to .env before using resume analysis."), {
+      statusCode: 500
+    });
   }
 
   const baseUrl = (process.env.LLM_BASE_URL || DEFAULT_LLM_BASE_URL).replace(/\/$/, "");
@@ -470,32 +438,18 @@ async function analyzeResumeWithLlm(resumeText) {
 
   if (!response.ok) {
     const detail = await response.text();
-    throw new Error(`LLM resume analysis failed (${response.status}): ${detail.slice(0, 240)}`);
+    console.error(`LLM resume analysis failed (${response.status}):`, detail.slice(0, 500));
+    throw Object.assign(new Error(`LLM resume analysis failed (status ${response.status}).`), { statusCode: 502 });
   }
 
   const data = await response.json();
-  const content = data.choices?.[0]?.message?.content;
-  if (!content) {
-    throw new Error("LLM response did not include profile JSON.");
-  }
-
-  let parsed;
-  try {
-    parsed = JSON.parse(content);
-  } catch {
-    const jsonMatch = content.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) {
-      throw new Error("LLM response was not valid JSON.");
-    }
-    parsed = JSON.parse(jsonMatch[0]);
-  }
-
+  const parsed = parseJsonFromLlmContent(data.choices?.[0]?.message?.content, "LLM response did not include profile JSON.");
   return coerceProfilePayload(parsed);
 }
 
 function parseJsonFromLlmContent(content, emptyMessage = "LLM response did not include JSON.") {
   if (!content) {
-    throw new Error(emptyMessage);
+    throw Object.assign(new Error(emptyMessage), { statusCode: 502 });
   }
 
   try {
@@ -503,9 +457,13 @@ function parseJsonFromLlmContent(content, emptyMessage = "LLM response did not i
   } catch {
     const jsonMatch = content.match(/\{[\s\S]*\}/);
     if (!jsonMatch) {
-      throw new Error("LLM response was not valid JSON.");
+      throw Object.assign(new Error("LLM response was not valid JSON."), { statusCode: 502 });
     }
-    return JSON.parse(jsonMatch[0]);
+    try {
+      return JSON.parse(jsonMatch[0]);
+    } catch {
+      throw Object.assign(new Error("LLM response was not valid JSON."), { statusCode: 502 });
+    }
   }
 }
 
@@ -592,7 +550,9 @@ function summarizeCompanyResearch(companyResearch) {
 async function callApplicationKitLlm({ resumeText, jobText, jobUrl, companyName, writingTone, companyResearch }) {
   const apiKey = process.env.LLM_API_KEY;
   if (!apiKey) {
-    throw new Error("LLM_API_KEY is not configured. Add it to .env before generating an application kit.");
+    throw Object.assign(new Error("LLM_API_KEY is not configured. Add it to .env before generating an application kit."), {
+      statusCode: 500
+    });
   }
 
   const baseUrl = (process.env.LLM_BASE_URL || DEFAULT_LLM_BASE_URL).replace(/\/$/, "");
@@ -643,77 +603,13 @@ async function callApplicationKitLlm({ resumeText, jobText, jobUrl, companyName,
 
   if (!response.ok) {
     const detail = await response.text();
-    throw new Error(`LLM application analysis failed (${response.status}): ${detail.slice(0, 240)}`);
+    console.error(`LLM application analysis failed (${response.status}):`, detail.slice(0, 500));
+    throw Object.assign(new Error(`LLM application analysis failed (status ${response.status}).`), { statusCode: 502 });
   }
 
   const data = await response.json();
   const parsed = parseJsonFromLlmContent(data.choices?.[0]?.message?.content, "LLM response did not include application-kit JSON.");
   return coerceApplicationKitPayload(parsed);
-}
-
-function generateProfileJobSearchCriteria(profile) {
-  const criteria = {
-    targetJobTypes: normalizeList(profile.targetJobTypes),
-    targetRegions: normalizeList(profile.targetRegions),
-    targetRoles: normalizeList(profile.targetRoles),
-    targetIndustries: normalizeList(profile.targetIndustries),
-    searchKeywords: unique([
-      ...normalizeList(profile.searchKeywords),
-      ...normalizeList(profile.technicalSkills).slice(0, 4),
-      ...normalizeList(profile.domainSkills).slice(0, 4)
-    ]),
-    excludedKeywords: normalizeList(profile.excludedKeywords),
-    remotePreference: profile.remotePreference || "Any",
-    experienceLevel: profile.experienceLevel || "Student",
-    resultLimit: Number(profile.resultLimit || 20)
-  };
-
-  return criteria;
-}
-
-function generateQueries(criteria) {
-  const roles = criteria.targetRoles.length ? criteria.targetRoles : ["Job"];
-  const regions = criteria.targetRegions.length ? criteria.targetRegions : ["Remote"];
-  const jobTypes = criteria.targetJobTypes.length ? criteria.targetJobTypes : ["Internship", "Graduate Role", "Full-time"];
-  const keywords = criteria.searchKeywords.slice(0, 3).join(" ");
-  const excluded = criteria.excludedKeywords.map((term) => `-${term}`).join(" ");
-  const noisyExclusions = [
-    "-site:linkedin.com",
-    "-site:indeed.com",
-    "-site:glassdoor.com",
-    "-site:ziprecruiter.com",
-    "-site:jooble.org",
-    "-site:talent.com",
-    "-salary",
-    "-interview",
-    "-template"
-  ].join(" ");
-  const directIntent = '(job OR careers OR "apply now" OR requisition)';
-  const atsSites = [
-    "site:greenhouse.io",
-    "site:jobs.lever.co",
-    "site:myworkdayjobs.com",
-    "site:smartrecruiters.com",
-    "site:ashbyhq.com",
-    "site:bamboohr.com"
-  ];
-
-  const queries = [];
-  for (const role of roles.slice(0, 4)) {
-    for (const region of regions.slice(0, 3)) {
-      for (const jobType of jobTypes.slice(0, 3)) {
-        for (const site of atsSites) {
-          queries.push(`${site} ${role} ${jobType} ${region} ${keywords} ${excluded}`.replace(/\s+/g, " ").trim());
-        }
-        const baseQuery = `${role} ${jobType} ${region} ${keywords} ${directIntent} ${noisyExclusions} ${excluded}`
-          .replace(/\s+/g, " ")
-          .trim();
-
-        queries.push(baseQuery);
-      }
-    }
-  }
-  return unique(queries).slice(0, 12);
 }
 
 function stripHtml(value) {
@@ -723,489 +619,62 @@ function stripHtml(value) {
     .trim();
 }
 
-function getHostname(value) {
-  try {
-    return new URL(value).hostname.replace(/^www\./, "");
-  } catch {
-    return "Unknown source";
-  }
-}
-
-function normalizeUrlForDedupe(value) {
-  try {
-    let url = new URL(value);
-    const redirectTarget = ["url", "u", "q", "target"].map((key) => url.searchParams.get(key)).find((candidate) => {
-      try {
-        return candidate && /^https?:\/\//i.test(candidate) && new URL(candidate);
-      } catch {
-        return false;
-      }
-    });
-
-    if (redirectTarget && GENERIC_SEARCH_HOST_PATTERNS.some((pattern) => pattern.test(url.hostname))) {
-      url = new URL(redirectTarget);
-    }
-
-    url.hash = "";
-    url.protocol = url.protocol.toLowerCase();
-    url.hostname = url.hostname.toLowerCase().replace(/^www\./, "");
-
-    for (const key of [...url.searchParams.keys()]) {
-      if (
-        /^utm_/i.test(key) ||
-        [
-          "fbclid",
-          "gclid",
-          "msclkid",
-          "igshid",
-          "ref",
-          "ref_src",
-          "source",
-          "src",
-          "campaign",
-          "trk",
-          "trackingId"
-        ].includes(key)
-      ) {
-        url.searchParams.delete(key);
-      }
-    }
-
-    const sortedParams = [...url.searchParams.entries()].sort(([keyA, valueA], [keyB, valueB]) =>
-      `${keyA}=${valueA}`.localeCompare(`${keyB}=${valueB}`)
-    );
-    url.search = "";
-    for (const [key, value] of sortedParams) {
-      url.searchParams.append(key, value);
-    }
-
-    const normalized = url.toString().replace(/\/(?=\?|$)/, "");
-    return normalized;
-  } catch {
-    return String(value || "").trim();
-  }
-}
-
-function normalizeFingerprintTerm(value) {
-  return stripHtml(value)
-    .toLowerCase()
-    .replace(/&amp;/g, "&")
-    .replace(/\b(inc|ltd|limited|llc|plc|corp|corporation|company|co)\b\.?/g, "")
-    .replace(/[^a-z0-9]+/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function getDuplicateKey(result) {
-  return [
-    normalizeFingerprintTerm(result.title),
-    normalizeFingerprintTerm(result.company),
-    normalizeFingerprintTerm(result.location),
-    normalizeFingerprintTerm(result.employmentType)
-  ].join("|");
-}
-
-function hostMatches(hostname, patterns) {
-  return patterns.some((pattern) => pattern.test(hostname));
-}
-
-function classifyJobSource(result) {
-  const canonicalUrl = normalizeUrlForDedupe(result.sourceUrl);
-  const hostname = getHostname(canonicalUrl).toLowerCase();
-  const sourceUrl = canonicalUrl.toLowerCase();
-  const haystack = `${result.title} ${result.snippet} ${sourceUrl}`.toLowerCase();
-  const isDirectAts = hostMatches(hostname, DIRECT_ATS_HOST_PATTERNS);
-  const isThirdParty = hostMatches(hostname, THIRD_PARTY_JOB_HOST_PATTERNS);
-  const isGenericSearch = hostMatches(hostname, GENERIC_SEARCH_HOST_PATTERNS);
-  const hasEmployerJobPath = /\/(job|jobs|careers|career|positions|openings|requisitions|vacanc|apply|boards|roles)\b/.test(sourceUrl);
-  const hasNonJobIntent = /\b(blog|news|article|salary|salaries|interview questions|template|course|training)\b/.test(haystack);
-
-  if (isGenericSearch) {
-    return { sourceQuality: "generic-search", sourceLabel: "Filtered search result", sourceQualityScore: 0, canonicalUrl };
-  }
-  if (isThirdParty) {
-    return { sourceQuality: "third-party-board", sourceLabel: "Third-party board", sourceQualityScore: 10, canonicalUrl };
-  }
-  if (hasNonJobIntent) {
-    return { sourceQuality: "non-job-page", sourceLabel: "Filtered non-job page", sourceQualityScore: 10, canonicalUrl };
-  }
-  if (isDirectAts) {
-    const sourceQualityScore = hasExactJobPostingPath(canonicalUrl) ? 92 : 58;
-    return { sourceQuality: "direct-ats", sourceLabel: "Direct ATS", sourceQualityScore, canonicalUrl };
-  }
-  if (hasEmployerJobPath) {
-    const sourceQualityScore = hasExactJobPostingPath(canonicalUrl) ? 76 : 52;
-    return { sourceQuality: "employer-careers", sourceLabel: "Employer careers", sourceQualityScore, canonicalUrl };
-  }
-
-  return { sourceQuality: "uncertain", sourceLabel: "Needs validation", sourceQualityScore: 35, canonicalUrl };
-}
-
-function hasExactJobPostingPath(value) {
-  try {
-    const url = new URL(normalizeUrlForDedupe(value));
-    const hostname = url.hostname.toLowerCase();
-    const pathname = url.pathname.toLowerCase().replace(/\/+$/, "");
-    const segments = pathname.split("/").filter(Boolean);
-
-    if (!segments.length || url.searchParams.has("error") || segments.includes("thanks")) return false;
-
-    if (/greenhouse\.io$/i.test(hostname)) return /\/jobs\/\d+/.test(pathname);
-    if (hostname === "jobs.lever.co") return segments.length >= 2 && /^[a-f0-9-]{12,}$/i.test(segments[1]);
-    if (/myworkdayjobs\.com$/i.test(hostname)) return segments.includes("job") && segments.length >= 4;
-    if (/smartrecruiters\.com$/i.test(hostname)) return segments.includes("jobs") && /[a-z0-9-]{8,}/.test(segments.at(-1) || "");
-    if (/ashbyhq\.com$/i.test(hostname)) return segments.includes("posting") || segments.includes("jobs");
-    if (/bamboohr\.com$/i.test(hostname)) return segments.includes("careers") && (/\d/.test(pathname) || segments.length >= 3);
-
-    const hasJobPath = segments.some((segment) => /^(job|jobs|careers|career|positions|openings|requisitions|vacancies|apply)$/.test(segment));
-    const hasPostingLikeSegment = segments.some((segment) => /\d{3,}|[a-f0-9]{8,}-[a-f0-9-]{8,}|[a-z]+-[a-z0-9-]{8,}/i.test(segment));
-    return hasJobPath && hasPostingLikeSegment;
-  } catch {
-    return false;
-  }
-}
-
-function assessJobDetailEvidence(text, result) {
-  const haystack = `${result.title} ${result.snippet} ${text}`.toLowerCase();
-  const evidenceTerms = [
-    "job description",
-    "responsibilities",
-    "requirements",
-    "qualifications",
-    "what you will do",
-    "what you'll do",
-    "apply now",
-    "employment type",
-    "job type",
-    "requisition",
-    "vacancy",
-    "about the role",
-    "the role"
-  ];
-  const matchedTerms = evidenceTerms.filter((term) => haystack.includes(term));
-  const hasRoleTerm = /\b(intern|internship|graduate|analyst|consultant|engineer|planner|manager|associate|assistant|specialist|developer|designer)\b/.test(haystack);
-  const hasApplyIntent = /\b(apply|application|submit your application|candidate|recruitment)\b/.test(haystack);
-  const score = matchedTerms.length * 18 + (hasRoleTerm ? 16 : 0) + (hasApplyIntent ? 18 : 0);
-
-  return {
-    hasJobDetailEvidence: score >= 52,
-    evidenceScore: Math.min(100, score),
-    evidenceTerms: matchedTerms.slice(0, 5)
-  };
-}
-
-function inferRegion(criteria, query) {
-  return criteria.targetRegions.find((region) => query.toLowerCase().includes(region.toLowerCase())) ||
-    criteria.targetRegions[0] ||
-    "Not specified";
-}
-
-function inferEmploymentType(criteria, query) {
-  return criteria.targetJobTypes.find((jobType) => query.toLowerCase().includes(jobType.toLowerCase())) ||
-    criteria.targetJobTypes[0] ||
-    "Not specified";
-}
-
-function scoreJobPageConfidence(result) {
-  const sourceUrl = String(result.canonicalUrl || result.sourceUrl || "");
-  const hostname = getHostname(sourceUrl);
-  const haystack = `${result.title} ${result.snippet} ${sourceUrl}`.toLowerCase();
-  const sourceClassification = classifyJobSource(result);
-  let confidence = sourceClassification.sourceQualityScore || 30;
-
-  if (/\b(job|jobs|career|careers|opening|intern|internship|graduate|apply|position|vacancy)\b/.test(haystack)) {
-    confidence += 14;
-  }
-  if (/\/job|\/jobs|\/careers|\/positions|\/openings|\/requisitions|\/apply/.test(sourceUrl.toLowerCase())) {
-    confidence += 10;
-  }
-  if (sourceClassification.sourceQuality === "third-party-board" || sourceClassification.sourceQuality === "generic-search") {
-    confidence -= 35;
-  }
-  if (/\b(blog|news|article|salary|interview questions|template)\b/.test(haystack)) {
-    confidence -= 30;
-  }
-  if (hostMatches(String(hostname).toLowerCase(), DIRECT_ATS_HOST_PATTERNS)) confidence += 10;
-
-  return Math.max(0, Math.min(100, confidence));
-}
-
-function normalizeBraveResult(result, criteria, matchedQuery, index) {
-  const sourceUrl = result.url || result.profile?.url || "";
-  const hostname = getHostname(sourceUrl);
-  const snippetParts = [result.description, ...(Array.isArray(result.extra_snippets) ? result.extra_snippets : [])];
-
-  const normalized = {
-    id: `brave_${Date.now()}_${index}`,
-    title: stripHtml(result.title) || "Untitled job result",
-    company: stripHtml(result.profile?.name) || hostname,
-    location: inferRegion(criteria, matchedQuery),
-    employmentType: inferEmploymentType(criteria, matchedQuery),
-    sourceName: hostname,
-    sourceUrl,
-    snippet: stripHtml(snippetParts.filter(Boolean).join(" ")),
-    postedAt: result.age || result.page_age || null,
-    matchedQuery,
-    jobPageConfidence: 0
-  };
-
-  Object.assign(normalized, classifyJobSource(normalized));
-  normalized.duplicateKey = getDuplicateKey(normalized);
-  normalized.jobPageConfidence = scoreJobPageConfidence(normalized);
-  return normalized;
-}
-
-async function validateJobCandidate(result) {
-  let candidate = {
-    ...result,
-    ...classifyJobSource(result)
-  };
-  candidate.duplicateKey = getDuplicateKey(candidate);
-  candidate.jobPageConfidence = scoreJobPageConfidence(candidate);
-
-  if (["generic-search", "third-party-board", "non-job-page"].includes(candidate.sourceQuality)) {
-    return null;
-  }
-
-  try {
-    const { finalUrl, html } = await fetchJobPageText(candidate.sourceUrl);
-    const readableText = htmlToReadableText(html);
-    const pageTitle = decodeHtmlEntities(html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1] || "");
-    const metaDescription = extractMetaContent(html, "description") || extractMetaContent(html, "og:description");
-
-    candidate = {
-      ...candidate,
-      sourceUrl: finalUrl,
-      sourceName: getHostname(finalUrl),
-      snippet: candidate.snippet || metaDescription || getMeaningfulLines(readableText).slice(0, 1).join(" "),
-      title: candidate.title || pageTitle || "Untitled job result"
-    };
-    Object.assign(candidate, classifyJobSource(candidate));
-    candidate.duplicateKey = getDuplicateKey(candidate);
-
-    if (["generic-search", "third-party-board", "non-job-page"].includes(candidate.sourceQuality)) {
-      return null;
-    }
-
-    const evidence = assessJobDetailEvidence(readableText, candidate);
-    candidate.jobPageConfidence = Math.max(candidate.jobPageConfidence, candidate.sourceQualityScore + Math.round(evidence.evidenceScore / 5));
-    candidate.validationEvidence = evidence.evidenceTerms;
-    const exactPostingUrl = hasExactJobPostingPath(candidate.sourceUrl) || hasExactJobPostingPath(result.sourceUrl);
-
-    if (evidence.hasJobDetailEvidence && exactPostingUrl) {
-      return {
-        ...candidate,
-        validationStatus: "verified",
-        sourceLabel: "Verified posting"
-      };
-    }
-
-    return null;
-  } catch (error) {
-    const exactPostingUrl = hasExactJobPostingPath(candidate.sourceUrl);
-    const hardFetchFailure = /404|410|did not return an HTML job page/i.test(error.message || "");
-
-    if (!hardFetchFailure && exactPostingUrl && candidate.sourceQualityScore >= 86 && candidate.jobPageConfidence >= 82) {
-      return {
-        ...candidate,
-        validationStatus: "trusted-direct-source",
-        sourceLabel: candidate.sourceQuality === "direct-ats" ? "Direct ATS" : "Direct posting",
-        validationMessage: `Could not pre-parse the page (${error.message || "fetch failed"}), but the URL is a high-confidence direct posting.`
-      };
-    }
-
-    return null;
-  }
-}
-
-async function validateAndDedupeJobCandidates(candidates, limit) {
-  const validated = [];
-  const seenUrls = new Set();
-  const seenDuplicateKeys = new Set();
-
-  for (const candidate of candidates) {
-    const validatedCandidate = await validateJobCandidate(candidate);
-    if (!validatedCandidate) continue;
-
-    const canonicalUrl = normalizeUrlForDedupe(validatedCandidate.canonicalUrl || validatedCandidate.sourceUrl);
-    const duplicateKey = getDuplicateKey(validatedCandidate);
-
-    if (seenUrls.has(canonicalUrl) || seenDuplicateKeys.has(duplicateKey)) continue;
-
-    seenUrls.add(canonicalUrl);
-    seenDuplicateKeys.add(duplicateKey);
-    validated.push({
-      ...validatedCandidate,
-      canonicalUrl,
-      duplicateKey
-    });
-
-    if (validated.length >= limit) break;
-  }
-
-  return validated;
-}
-
-async function braveSearchProvider(criteria, generatedQueries) {
-  const cacheKey = stableStringify({ provider: "brave", criteria, generatedQueries });
-  const cached = searchCache.get(cacheKey);
-  if (cached && Date.now() - cached.createdAt < SEARCH_CACHE_TTL_MS) {
-    return {
-      ...cached.value,
-      cacheHit: true
-    };
-  }
-
-  const apiKey = process.env.BRAVE_SEARCH_API_KEY;
-  if (!apiKey) {
-    return {
-      provider: "brave",
-      results: [],
-      warning: "BRAVE_SEARCH_API_KEY is missing, so live search results were not fetched."
-    };
-  }
-
-  const limit = Math.max(1, Math.min(criteria.resultLimit || 20, 30));
-  const rawCandidateLimit = Math.max(limit * 3, limit + 12);
-  const queriesToRun = generatedQueries.slice(0, Math.min(8, generatedQueries.length));
-  const countPerQuery = Math.max(3, Math.min(10, Math.ceil(limit / Math.max(queriesToRun.length, 1)) + 2));
-  const seenUrls = new Set();
-  const results = [];
-
-  for (const query of queriesToRun) {
-    const url = new URL(process.env.BRAVE_SEARCH_API_ENDPOINT || DEFAULT_BRAVE_SEARCH_API_ENDPOINT);
-    url.search = new URLSearchParams({
-      q: query,
-      count: String(countPerQuery),
-      country: "us",
-      search_lang: "en",
-      safesearch: "moderate",
-      extra_snippets: "true"
-    }).toString();
-
-    const response = await fetch(url, {
-      headers: {
-        Accept: "application/json",
-        "Accept-Encoding": "gzip",
-        "X-Subscription-Token": apiKey
-      }
-    });
-
-    if (!response.ok) {
-      const detail = await response.text();
-      throw new Error(`Brave Search API failed (${response.status}): ${detail.slice(0, 240)}`);
-    }
-
-    const data = await response.json();
-    const braveResults = data.web?.results || [];
-    for (const braveResult of braveResults) {
-      const sourceUrl = braveResult.url || braveResult.profile?.url;
-      if (!sourceUrl || seenUrls.has(sourceUrl)) continue;
-      seenUrls.add(sourceUrl);
-      results.push(normalizeBraveResult(braveResult, criteria, query, results.length));
-      if (results.length >= rawCandidateLimit) break;
-    }
-
-    if (results.length >= rawCandidateLimit) break;
-  }
-
-  const validatedResults = await validateAndDedupeJobCandidates(results, limit);
-
-  const providerResult = {
-    provider: "brave",
-    results: validatedResults
-  };
-  searchCache.set(cacheKey, {
-    createdAt: Date.now(),
-    value: providerResult
-  });
-  return providerResult;
-}
-
-function rankJobSearchResults(criteria, results) {
-  const positiveTerms = unique([
-    ...criteria.targetRoles,
-    ...criteria.targetRegions,
-    ...criteria.targetIndustries,
-    ...criteria.searchKeywords,
-    ...criteria.targetJobTypes
-  ]).map((term) => term.toLowerCase());
-  const excludedTerms = criteria.excludedKeywords.map((term) => term.toLowerCase());
-
-  return results
-    .map((result) => {
-      const haystack = `${result.title} ${result.company} ${result.location} ${result.employmentType} ${result.snippet}`.toLowerCase();
-      const positiveMatches = positiveTerms.filter((term) => haystack.includes(term.toLowerCase()));
-      const excludedMatches = excludedTerms.filter((term) => haystack.includes(term.toLowerCase()));
-      const base = 52;
-      const score = Math.max(15, Math.min(96, base + positiveMatches.length * 7 - excludedMatches.length * 18));
-      const jobPageConfidence = Number(result.jobPageConfidence || 0);
-      const validationBoost = result.validationStatus === "verified"
-        ? 10
-        : result.validationStatus === "trusted-direct-source" || result.validationStatus === "mock-validated"
-          ? 6
-          : -14;
-      const sourceBoost = result.sourceQuality === "direct-ats"
-        ? 8
-        : result.sourceQuality === "employer-careers"
-          ? 5
-          : -18;
-      const adjustedScore = Math.max(15, Math.min(98, score + Math.round((jobPageConfidence - 50) / 5) + validationBoost + sourceBoost));
-      const reasonParts = [];
-
-      if (positiveMatches.length) {
-        reasonParts.push(`Matches ${unique(positiveMatches).slice(0, 5).join(", ")}.`);
-      }
-      if (result.validationStatus === "verified") {
-        reasonParts.push("Verified as a job-detail posting before being shown.");
-      } else if (result.validationStatus === "trusted-direct-source" || result.validationStatus === "mock-validated") {
-        reasonParts.push("Comes from a direct employer or ATS source.");
-      }
-      if (criteria.remotePreference && criteria.remotePreference !== "Any") {
-        reasonParts.push(`Remote preference is set to ${criteria.remotePreference}; verify details on the source page.`);
-      }
-      if (excludedMatches.length) {
-        reasonParts.push(`Contains excluded term(s): ${excludedMatches.join(", ")}.`);
-      }
-
-      return {
-        ...result,
-        preliminaryScore: adjustedScore,
-        recommendationReason: reasonParts.join(" ") || "Recommended because it aligns with your profile search criteria."
-      };
-    })
-    .sort((a, b) => b.preliminaryScore - a.preliminaryScore);
-}
-
 function isPrivateIp(hostname) {
-  const ipVersion = net.isIP(hostname);
+  // Unwrap IPv4-mapped IPv6 (e.g. ::ffff:127.0.0.1) so the IPv4 rules apply.
+  let candidate = String(hostname || "").toLowerCase();
+  const mapped = candidate.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
+  if (mapped) candidate = mapped[1];
+
+  const ipVersion = net.isIP(candidate);
   if (!ipVersion) return false;
 
   if (ipVersion === 4) {
-    const parts = hostname.split(".").map(Number);
+    const parts = candidate.split(".").map(Number);
     return (
       parts[0] === 10 ||
       parts[0] === 127 ||
       (parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31) ||
       (parts[0] === 192 && parts[1] === 168) ||
       (parts[0] === 169 && parts[1] === 254) ||
+      (parts[0] === 100 && parts[1] >= 64 && parts[1] <= 127) ||
+      (parts[0] === 198 && (parts[1] === 18 || parts[1] === 19)) ||
       parts[0] === 0
     );
   }
 
-  const normalized = hostname.toLowerCase();
-  return normalized === "::1" || normalized.startsWith("fc") || normalized.startsWith("fd") || normalized.startsWith("fe80");
+  return (
+    candidate === "::1" ||
+    candidate === "::" ||
+    candidate.startsWith("::ffff:") ||
+    candidate.startsWith("fc") ||
+    candidate.startsWith("fd") ||
+    candidate.startsWith("fe80")
+  );
 }
 
-function validatePublicHttpUrl(value) {
+async function validatePublicHttpUrl(value) {
   const url = new URL(value);
-  const hostname = url.hostname.toLowerCase();
+  const hostname = url.hostname.toLowerCase().replace(/^\[|\]$/g, "");
 
   if (!["http:", "https:"].includes(url.protocol)) {
     throw new Error("Only HTTP and HTTPS job URLs can be analyzed.");
   }
   if (hostname === "localhost" || hostname.endsWith(".localhost") || isPrivateIp(hostname)) {
     throw new Error("Local and private-network URLs cannot be analyzed.");
+  }
+
+  if (!net.isIP(hostname)) {
+    let addresses;
+    try {
+      addresses = await dns.promises.lookup(hostname, { all: true, verbatim: true });
+    } catch {
+      throw new Error("The job URL hostname could not be resolved.");
+    }
+    // Residual risk (accepted for this prototype): DNS could change between this
+    // lookup and the fetch (rebinding). Defending that needs a pinned-IP agent.
+    if (!addresses.length || addresses.some((entry) => isPrivateIp(entry.address))) {
+      throw new Error("Local and private-network URLs cannot be analyzed.");
+    }
   }
 
   return url;
@@ -1232,16 +701,6 @@ function decodeHtmlEntities(value) {
   });
 }
 
-function extractMetaContent(html, name) {
-  const escapedName = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const pattern = new RegExp(
-    `<meta[^>]+(?:name|property)=["']${escapedName}["'][^>]+content=["']([^"']+)["'][^>]*>|<meta[^>]+content=["']([^"']+)["'][^>]+(?:name|property)=["']${escapedName}["'][^>]*>`,
-    "i"
-  );
-  const match = html.match(pattern);
-  return decodeHtmlEntities(match?.[1] || match?.[2] || "");
-}
-
 function htmlToReadableText(html) {
   return decodeHtmlEntities(
     String(html || "")
@@ -1259,19 +718,38 @@ function htmlToReadableText(html) {
 }
 
 async function fetchJobPageText(sourceUrl) {
-  const url = validatePublicHttpUrl(sourceUrl);
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), JOB_PAGE_FETCH_TIMEOUT_MS);
 
   try {
-    const response = await fetch(url, {
-      redirect: "follow",
-      signal: controller.signal,
-      headers: {
-        Accept: "text/html,application/xhtml+xml",
-        "User-Agent": "CareerPilotAI/1.0 (+local job parser)"
+    let url = await validatePublicHttpUrl(sourceUrl);
+    let response;
+
+    // Follow redirects manually so every hop is re-validated against private hosts.
+    for (let hop = 0; ; hop += 1) {
+      response = await fetch(url, {
+        redirect: "manual",
+        signal: controller.signal,
+        headers: {
+          Accept: "text/html,application/xhtml+xml",
+          "User-Agent": "CareerPilotAI/1.0 (+local job parser)"
+        }
+      });
+
+      if (response.status >= 300 && response.status < 400) {
+        const location = response.headers.get("location");
+        if (!location) {
+          throw new Error(`Job page fetch failed (${response.status}).`);
+        }
+        if (hop >= 4) {
+          throw new Error("Too many redirects while fetching the job page.");
+        }
+        response.body?.cancel().catch(() => {});
+        url = await validatePublicHttpUrl(new URL(location, url).toString());
+        continue;
       }
-    });
+      break;
+    }
 
     if (!response.ok) {
       throw new Error(`Job page fetch failed (${response.status}).`);
@@ -1308,159 +786,6 @@ async function fetchJobPageText(sourceUrl) {
     };
   } finally {
     clearTimeout(timeout);
-  }
-}
-
-function getMeaningfulLines(text) {
-  return String(text || "")
-    .split(/\n+/)
-    .map((line) => line.replace(/\s+/g, " ").trim())
-    .filter((line) => line.length >= 35 && line.length <= 260);
-}
-
-function pickSectionLines(lines, sectionTerms, fallbackTerms) {
-  const selected = [];
-  let active = false;
-
-  for (const line of lines) {
-    const lower = line.toLowerCase();
-    if (sectionTerms.some((term) => lower.includes(term))) {
-      active = true;
-      continue;
-    }
-    if (active && /^(benefits|about us|equal opportunity|location|salary|apply|company|what we offer)\b/i.test(line)) {
-      active = false;
-    }
-    if (active || fallbackTerms.some((term) => lower.includes(term))) {
-      selected.push(line);
-    }
-    if (selected.length >= 5) break;
-  }
-
-  return unique(selected).slice(0, 5);
-}
-
-function extractKeywords(text, seedTerms) {
-  const skillTerms = [
-    "python",
-    "gis",
-    "excel",
-    "sql",
-    "tableau",
-    "power bi",
-    "autocad",
-    "anylogic",
-    "sumo",
-    "transport planning",
-    "data analysis",
-    "project management",
-    "stakeholder",
-    "research",
-    "report writing",
-    "consulting",
-    "urban planning",
-    "communication",
-    "simulation",
-    "modeling"
-  ];
-  const lower = String(text || "").toLowerCase();
-  return unique([...seedTerms, ...skillTerms.filter((term) => lower.includes(term))]).slice(0, 12);
-}
-
-function fallbackParsedJob(result, parseStatus, parserMessage) {
-  return {
-    jobId: `job_${Date.now()}`,
-    title: result.title,
-    company: result.company,
-    location: result.location,
-    employmentType: result.employmentType,
-    sourceUrl: result.sourceUrl,
-    responsibilities: [
-      "Support project research, analysis, and reporting.",
-      "Prepare maps, tables, summaries, or technical inputs for the project team.",
-      "Coordinate with consultants, clients, or internal stakeholders."
-    ],
-    requirements: [
-      "Relevant academic or professional background.",
-      "Strong analytical and written communication skills.",
-      "Interest in the target industry and role."
-    ],
-    preferredSkills: ["GIS", "Python", "Excel", "transport planning", "data analysis"],
-    keywords: ["analysis", "consulting", "planning", "report writing"],
-    deadline: null,
-    parserStatus: parseStatus,
-    parserMessage,
-    parsedFrom: "search-result-snippet"
-  };
-}
-
-async function parseJobFromResult(result) {
-  const sourceUrl = result.sourceUrl;
-  if (!sourceUrl) {
-    return fallbackParsedJob(result, "fallback", "No source URL was available for this result.");
-  }
-
-  const cacheKey = sourceUrl;
-  const cached = jobParseCache.get(cacheKey);
-  if (cached && Date.now() - cached.createdAt < JOB_PARSE_CACHE_TTL_MS) {
-    return {
-      ...cached.value,
-      cacheHit: true
-    };
-  }
-
-  try {
-    const { finalUrl, html } = await fetchJobPageText(sourceUrl);
-    const readableText = htmlToReadableText(html);
-    const lines = getMeaningfulLines(readableText);
-    const pageTitle = decodeHtmlEntities(html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1] || "");
-    const metaDescription = extractMetaContent(html, "description") || extractMetaContent(html, "og:description");
-
-    const responsibilities = pickSectionLines(
-      lines,
-      ["responsibilities", "what you will do", "what you'll do", "role overview", "the role"],
-      ["support", "prepare", "coordinate", "analyze", "develop", "work with", "assist"]
-    );
-    const requirements = pickSectionLines(
-      lines,
-      ["requirements", "qualifications", "what you need", "what we're looking for", "about you"],
-      ["experience", "degree", "skills", "proficiency", "knowledge", "ability", "eligible"]
-    );
-    const keywords = extractKeywords(readableText, [
-      result.employmentType,
-      result.location,
-      ...(String(result.matchedQuery || "").split(/\s+/).filter((term) => term.length > 3).slice(0, 4))
-    ]);
-
-    const parsedJob = {
-      jobId: `job_${Date.now()}`,
-      title: result.title || pageTitle || "Untitled job",
-      company: result.company || getHostname(finalUrl),
-      location: result.location || "Not specified",
-      employmentType: result.employmentType || "Not specified",
-      sourceUrl: finalUrl,
-      responsibilities: responsibilities.length ? responsibilities : ["Review the source page for detailed responsibilities."],
-      requirements: requirements.length ? requirements : ["Review the source page for detailed requirements."],
-      preferredSkills: keywords.slice(0, 8),
-      keywords,
-      deadline: null,
-      parserStatus: "parsed",
-      parserMessage: "Parsed from the selected job page.",
-      parsedFrom: "source-url",
-      summary: metaDescription || lines.slice(0, 2).join(" ")
-    };
-
-    jobParseCache.set(cacheKey, {
-      createdAt: Date.now(),
-      value: parsedJob
-    });
-    return parsedJob;
-  } catch (error) {
-    return fallbackParsedJob(
-      result,
-      "fallback",
-      `${error.message || "Could not fetch the selected job page."} Used search result snippet instead.`
-    );
   }
 }
 
@@ -1621,7 +946,8 @@ async function searchCompanyContext({ jobText, jobUrl, companyName }) {
 
     if (!response.ok) {
       const detail = await response.text();
-      throw new Error(`Brave Search API failed (${response.status}): ${detail.slice(0, 180)}`);
+      console.error(`Brave Search API failed (${response.status}):`, detail.slice(0, 500));
+      throw new Error(`Brave Search API failed (status ${response.status}).`);
     }
 
     const data = await response.json();
@@ -1637,6 +963,7 @@ async function searchCompanyContext({ jobText, jobUrl, companyName }) {
       results
     };
 
+    pruneCache(searchCache, SEARCH_CACHE_TTL_MS);
     searchCache.set(cacheKey, {
       createdAt: Date.now(),
       value: providerResult
@@ -1656,7 +983,7 @@ function handleStatic(req, res, pathname) {
   const safePath = pathname === "/" ? "/index.html" : pathname;
   const filePath = path.normalize(path.join(PUBLIC_DIR, safePath));
 
-  if (!filePath.startsWith(PUBLIC_DIR)) {
+  if (filePath !== PUBLIC_DIR && !filePath.startsWith(PUBLIC_DIR + path.sep)) {
     res.writeHead(403);
     res.end("Forbidden");
     return;
@@ -1676,12 +1003,16 @@ function handleStatic(req, res, pathname) {
 
 async function handleApi(req, res, pathname) {
   try {
-    if (req.method === "POST" && pathname === "/api/analyze-profile") {
-      const body = await readRequestBody(req);
-      return sendJson(res, 200, analyzeProfile(body.profile || body));
-    }
-
     if (req.method === "POST" && pathname === "/api/analyze-resume") {
+      const rateLimit = consumeGenerationRateLimit(req);
+      if (!rateLimit.allowed) {
+        res.setHeader("Retry-After", String(rateLimit.retryAfterSeconds));
+        return sendJson(res, 429, {
+          error: `Too many generation requests. Try again in ${rateLimit.retryAfterSeconds} seconds.`,
+          retryAfterSeconds: rateLimit.retryAfterSeconds
+        });
+      }
+
       const bodyBuffer = await readRequestBuffer(req, RESUME_UPLOAD_MAX_BYTES);
       const formData = parseMultipartFormData(req, bodyBuffer);
       const resumeFile = formData.files.find((file) => file.name === "resume") || formData.files[0];
@@ -1710,6 +1041,15 @@ async function handleApi(req, res, pathname) {
     }
 
     if (req.method === "POST" && pathname === "/api/analyze-application") {
+      const rateLimit = consumeGenerationRateLimit(req);
+      if (!rateLimit.allowed) {
+        res.setHeader("Retry-After", String(rateLimit.retryAfterSeconds));
+        return sendJson(res, 429, {
+          error: `Too many generation requests. Try again in ${rateLimit.retryAfterSeconds} seconds.`,
+          retryAfterSeconds: rateLimit.retryAfterSeconds
+        });
+      }
+
       if (!String(req.headers["content-type"] || "").includes("multipart/form-data")) {
         return sendJson(res, 400, { error: "Application analysis must use multipart/form-data." });
       }
@@ -1770,24 +1110,14 @@ async function handleApi(req, res, pathname) {
     }
 
     if (req.method === "POST" && pathname === "/api/save-application-kit") {
-      const body = await readRequestBody(req);
-      const kit = coerceApplicationKitPayload(body.kit || {});
-      const savedKit = {
-        id: `kit_${Date.now()}`,
-        kit,
-        source: body.source || null,
-        resume: body.resume || null,
-        companyResearch: body.companyResearch || null,
-        savedAt: new Date().toISOString(),
-        status: "Generated"
-      };
-      savedApplicationKits.unshift(savedKit);
-      return sendJson(res, 200, { savedKit, savedApplicationKits });
+      return sendJson(res, 410, {
+        error: "Saved kits are stored in your browser now. This endpoint has been retired."
+      });
     }
 
     if (req.method === "POST" && pathname === "/api/save-job") {
       return sendJson(res, 410, {
-        error: "This endpoint has been retired. Use /api/save-application-kit."
+        error: "This endpoint has been retired. Saved kits are stored in your browser now."
       });
     }
 
@@ -1797,18 +1127,19 @@ async function handleApi(req, res, pathname) {
       });
     }
 
-    if (req.method === "GET" && pathname === "/api/saved-application-kits") {
-      return sendJson(res, 200, { savedApplicationKits });
-    }
-
-    if (req.method === "GET" && pathname === "/api/saved-jobs") {
-      return sendJson(res, 200, { savedApplicationKits });
+    if (req.method === "GET" && (pathname === "/api/saved-application-kits" || pathname === "/api/saved-jobs")) {
+      return sendJson(res, 410, {
+        error: "Saved kits are stored in your browser now. This endpoint has been retired."
+      });
     }
 
     sendJson(res, 404, { error: "API route not found" });
   } catch (error) {
+    if (!error.statusCode) {
+      console.error("Unhandled API error:", error);
+    }
     sendJson(res, error.statusCode || 500, {
-      error: error.message || "Unexpected server error",
+      error: error.statusCode ? error.message || "Request failed." : "Unexpected server error.",
       ...(error.needsManualPaste
         ? {
             needsManualPaste: true,
