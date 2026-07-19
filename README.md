@@ -22,6 +22,12 @@ Generated application kit — fit score ring, match/gap analysis, and company re
 
 ![Generated application kit with fit analysis](docs/screenshot-kit.png)
 
+The interface follows the system theme automatically. The same kit view in dark mode:
+
+![Generated application kit in dark mode](docs/screenshot-kit-dark.png)
+
+Screenshots show sample data staged via the built-in demo mode (`/?demo=kit`), which renders the kit view with fixed content and no animations so captures are deterministic.
+
 Users upload a resume, paste a job URL or the job hiring content, and generate:
 
 - Job-fit analysis
@@ -72,6 +78,7 @@ http://localhost:3000
 - Staged progress bar during analysis and generation
 - OpenAI-compatible LLM generation through the backend
 - Structured application kit rendering
+- Light and dark liquid-glass themes following the system color-scheme preference
 - Saved application kit tracker (browser localStorage, per-browser, capped at 30 kits)
 - Per-IP rate limiting on the generation endpoints
 
