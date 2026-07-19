@@ -8,6 +8,10 @@ This workspace includes a dependency-free MVP for resume-based job application a
 
 The backend calls any OpenAI-compatible chat-completions API; the active model is whatever `LLM_MODEL` is configured to on the deployment.
 
+## How It Works
+
+![How CareerPilot AI works in four steps: input, gather context, generate, and deliver the application kit](docs/how-it-works.svg)
+
 ## Screenshots
 
 Application Studio — upload a resume and paste the target role:
@@ -25,10 +29,6 @@ Users upload a resume, paste a job URL or the job hiring content, and generate:
 - A dedicated cover letter
 - A concise application email
 - Saved application kits for follow-up (stored in the user's own browser via localStorage)
-
-## How It Works
-
-![How CareerPilot AI works in four steps: input, gather context, generate, and deliver the application kit](docs/how-it-works.svg)
 
 ## Run
 
