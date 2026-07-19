@@ -1,6 +1,6 @@
 # CareerPilot AI Application Studio Prototype
 
-This workspace includes a dependency-free MVP for resume-based job application analysis.
+CareerPilot AI — turns your resume + a job posting into a tailored application kit: fit analysis, resume fixes, cover letter, and application email. Zero-dependency Node.js with SSRF-safe job fetching and Brave Search company research, deployed on Vercel.
 
 ## Live Version
 
