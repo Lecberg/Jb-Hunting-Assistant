@@ -8,6 +8,16 @@ This workspace includes a dependency-free MVP for resume-based job application a
 
 The backend calls any OpenAI-compatible chat-completions API; the active model is whatever `LLM_MODEL` is configured to on the deployment.
 
+## Screenshots
+
+Application Studio — upload a resume and paste the target role:
+
+![Application Studio input form](docs/screenshot-studio.png)
+
+Generated application kit — fit score ring, match/gap analysis, and company research:
+
+![Generated application kit with fit analysis](docs/screenshot-kit.png)
+
 Users upload a resume, paste a job URL or the job hiring content, and generate:
 
 - Job-fit analysis
