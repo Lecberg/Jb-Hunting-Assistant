@@ -42,6 +42,8 @@ const saveKitButton = document.querySelector("#saveKitButton");
 const savedList = document.querySelector("#savedList");
 const toast = document.querySelector("#toast");
 
+const DEMO_MODE = new URLSearchParams(window.location.search).get("demo") === "kit";
+
 let activeKitPayload = null;
 let savedKitCache = [];
 let progressTimer = null;
@@ -248,6 +250,12 @@ function setFitScore(score) {
   const band = scoreBand(safeScore);
   fitVisual.dataset.band = band;
   fitVerdict.textContent = fitVerdicts[band];
+  if (DEMO_MODE) {
+    fitRingValue.style.transition = "none";
+    fitRingValue.style.strokeDashoffset = String(FIT_RING_CIRCUMFERENCE * (1 - safeScore / 100));
+    fitScore.textContent = String(safeScore);
+    return;
+  }
   fitRingValue.style.transition = "none";
   fitRingValue.style.strokeDashoffset = String(FIT_RING_CIRCUMFERENCE);
   void fitRingValue.getBoundingClientRect();
@@ -524,3 +532,61 @@ kitTabButtons.forEach((button) => {
 });
 
 renderSavedKits(readSavedKits());
+
+// Demo mode: /?demo=kit stages the kit view with sample data for screenshots.
+if (DEMO_MODE) {
+  activeKitPayload = {
+    kit: {
+      job: { title: "Senior Frontend Engineer", company: "Acme Infrastructure", location: "Remote (EU)" },
+      fitAnalysis: {
+        overallScore: 82,
+        fitSummary:
+          "Strong overlap on React, TypeScript, and design-system work. The resume shows direct experience with the component library migration this role owns, and the accessibility background matches a stated team priority.",
+        strongMatches: ["React + TypeScript", "Design systems", "Accessibility (WCAG 2.2)", "Frontend performance"],
+        gaps: ["No GraphQL on resume", "Kubernetes exposure unclear"],
+        applicationStrategy:
+          "Lead with the design-system migration story and quantify the performance wins. Address the GraphQL gap directly in the cover letter by pointing to comparable API-layer work."
+      },
+      resumeSuggestions: [
+        {
+          section: "Experience - Frontend Platform",
+          problem: "The migration bullet lists tasks without outcomes.",
+          suggestedRevision:
+            "Led the migration of a 40-component design system to React 18 and TypeScript, cutting UI defect reports by 31% quarter over quarter.",
+          reason: "Mirrors the role's core responsibility and adds a measurable result."
+        },
+        {
+          section: "Skills",
+          problem: "GraphQL is absent even though adjacent API experience exists.",
+          suggestedRevision: "Add a line for API integration work: REST, tRPC, and schema-first design with OpenAPI.",
+          reason: "Softens the GraphQL gap by showing comparable API-layer depth."
+        }
+      ],
+      coverLetter: {
+        subject: "Application for Senior Frontend Engineer - Acme Infrastructure",
+        body: "Dear Acme Infrastructure team,\n\nYour posting for a Senior Frontend Engineer stood out because it centers on the exact work I have spent the last three years doing: moving a large product onto a modern design system without slowing feature delivery.\n\nAt my current company I led a 40-component migration to React 18 and TypeScript while the product kept shipping weekly. The result was a 31% drop in UI defects and a measurably faster onboarding path for new engineers. Accessibility was not an afterthought: the system ships WCAG 2.2 AA checks in CI.\n\nI would welcome the chance to bring that playbook to Acme's platform team.\n\nBest regards,\nJordan Reyes"
+      },
+      applicationEmail: {
+        subject: "Senior Frontend Engineer application - Jordan Reyes",
+        body: "Hi Acme Infrastructure recruiting team,\n\nI just submitted my application for the Senior Frontend Engineer role. My background centers on design-system migrations in React and TypeScript, with a strong accessibility track record that matches the priorities in your posting.\n\nMy resume and cover letter are attached. Happy to share more context whenever useful.\n\nThanks,\nJordan Reyes"
+      }
+    },
+    source: { type: "manual" },
+    resume: { filename: "resume.pdf" },
+    companyResearch: {
+      provider: "brave",
+      query: "Acme Infrastructure company",
+      results: [
+        {
+          title: "Acme Infrastructure raises Series C to expand European platform",
+          url: "https://example.com/acme-series-c",
+          snippet: "Acme Infrastructure announced a Series C round to grow its managed platform business across the EU."
+        }
+      ]
+    }
+  };
+  saveKitButton.disabled = false;
+  renderKit(activeKitPayload);
+  // Skip the entrance animation so captures are deterministic.
+  kitOutput.classList.remove("reveal");
+}
