@@ -1978,3 +1978,102 @@ fieldset input {
     background: rgba(5, 8, 18, 0.55);
   }
 }
+
+/* Customizable select picker (Chromium 135+); other browsers keep the native popup */
+
+@supports (appearance: base-select) {
+  select,
+  select::picker(select) {
+    appearance: base-select;
+  }
+
+  select::picker-icon {
+    color: var(--muted);
+    transition: rotate 180ms ease;
+  }
+
+  select:open::picker-icon {
+    rotate: 180deg;
+  }
+
+  select::picker(select) {
+    margin-block: 6px;
+    border: 1px solid var(--glass-border);
+    border-radius: var(--radius-sm);
+    padding: 0.3rem;
+    background: rgba(255, 255, 255, 0.72);
+    backdrop-filter: var(--glass-blur);
+    -webkit-backdrop-filter: var(--glass-blur);
+    box-shadow: var(--shadow);
+    opacity: 0;
+    transform: scale(0.96);
+    transition:
+      opacity 160ms ease,
+      transform 160ms cubic-bezier(0.22, 0.8, 0.36, 1),
+      overlay 160ms ease allow-discrete,
+      display 160ms ease allow-discrete;
+  }
+
+  select:open::picker(select) {
+    opacity: 1;
+    transform: none;
+  }
+
+  @starting-style {
+    select:open::picker(select) {
+      opacity: 0;
+      transform: scale(0.96);
+    }
+  }
+
+  option {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    border-radius: 8px;
+    padding: 0.5rem 0.62rem;
+    color: var(--ink-soft);
+    font-size: 0.9rem;
+    font-weight: 550;
+    transition:
+      background 120ms ease,
+      color 120ms ease;
+  }
+
+  option:hover,
+  option:focus-visible {
+    color: var(--ink);
+    background: var(--accent-soft);
+  }
+
+  option:checked {
+    color: var(--ink);
+    font-weight: 650;
+  }
+
+  option::checkmark {
+    order: 1;
+    margin-left: auto;
+    color: var(--accent);
+    font-weight: 700;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    select::picker(select) {
+      border-color: rgba(255, 255, 255, 0.16);
+      background: rgba(24, 30, 54, 0.85);
+    }
+
+    option:hover,
+    option:focus-visible {
+      background: rgba(255, 255, 255, 0.09);
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    select::picker(select),
+    select::picker-icon {
+      transition: none;
+    }
+  }
+}
