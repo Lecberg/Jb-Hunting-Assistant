@@ -293,18 +293,26 @@ function renderCompanyResearch(companyResearch) {
   const warning = companyResearch?.warning;
   const query = companyResearch?.query;
   companyResearchMeta.textContent = warning
-    ? `${warning}${query ? ` Query: ${query}` : ""}`
-    : `Used ${results.length} ${companyResearch?.provider || "search"} result${results.length === 1 ? "" : "s"} for company context. Query: ${query || "not available"}`;
+    ? warning
+    : `${results.length} web source${results.length === 1 ? "" : "s"}${query ? ` for "${query}"` : ""}`;
 
   companyResearchList.innerHTML = results.length
     ? results
         .map((result) => {
           const url = safeHttpUrl(result.url);
+          let domain = "";
+          try {
+            domain = url ? new URL(url).hostname.replace(/^www\./, "") : "";
+          } catch {
+            domain = "";
+          }
+          const title = escapeHtml(result.title || domain || "Untitled source");
+          const snippet = result.snippet ? `<p>${escapeHtml(result.snippet)}</p>` : "";
           return `
             <article class="company-research-item">
-              <strong>${escapeHtml(result.title || "Untitled source")}</strong>
-              ${url ? `<a href="${escapeHtml(url)}" target="_blank" rel="noreferrer">${escapeHtml(url)}</a>` : ""}
-              <p>${escapeHtml(result.snippet || "No snippet returned.")}</p>
+              ${url ? `<a href="${escapeHtml(url)}" target="_blank" rel="noreferrer">${title}</a>` : `<strong>${title}</strong>`}
+              ${domain ? `<span class="company-research-domain">${escapeHtml(domain)}</span>` : ""}
+              ${snippet}
             </article>
           `;
         })
@@ -323,7 +331,11 @@ function renderKit(payload) {
   outputJobMeta.textContent = `${job.company || "Unknown company"} - ${job.location || "Not specified"}`;
   outputSourceNote.textContent = `${source?.type === "manual" ? "Generated from pasted job content" : "Generated from job URL"}${
     resume?.filename ? ` using ${resume.filename}` : ""
-  }. ${companyResearch?.results?.length ? `Company research used ${companyResearch.results.length} search results.` : companyResearch?.warning || ""}`.trim();
+  }. ${
+    companyResearch?.results?.length
+      ? `Company research used ${companyResearch.results.length} web source${companyResearch.results.length === 1 ? "" : "s"}.`
+      : companyResearch?.warning || ""
+  }`.trim();
   setFitScore(fit.overallScore);
   fitSummary.textContent = fit.fitSummary || "No fit summary generated.";
   renderList(strongMatchesList, fit.strongMatches);
