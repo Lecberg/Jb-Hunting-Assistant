@@ -26,6 +26,10 @@ Users upload a resume, paste a job URL or the job hiring content, and generate:
 - A concise application email
 - Saved application kits for follow-up (stored in the user's own browser via localStorage)
 
+## How It Works
+
+![How CareerPilot AI works in four steps: input, gather context, generate, and deliver the application kit](docs/how-it-works.svg)
+
 ## Run
 
 Create a local `.env` file first:
